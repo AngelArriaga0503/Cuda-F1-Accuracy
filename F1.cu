@@ -10,20 +10,37 @@
 
 
 
-__global__ void getF1(float* TP, float* FP, float* FN, float* trueValuesByClass, int* noClasses, float* samplesPerClass, float* F1_Macro, float* F1_Weighted, int widthTrue){
- atomicAdd(F1_Macro, ( TP[threadIdx.x] / (TP[threadIdx.x] + 0.5 * (FP[threadIdx.x] + FN[threadIdx.x])) ));
- atomicAdd(F1_Weighted, ( (samplesPerClass[threadIdx.x] / widthTrue) * (TP[threadIdx.x] / (TP[threadIdx.x] + 0.5 * (FP[threadIdx.x] + FN[threadIdx.x]))) ));    
+__global__ void getF1(float* TP, float* FP, float* FN, float* trueValuesByClass, int* noClasses, float* samplesPerClass, float* F1_Macro, float* F1_Weighted, int noTargetValues, int noIndividuals){
+ int idx = (blockDim.x * blockDim.y * blockIdx.y * gridDim.x) + (blockDim.x * blockDim.y * blockIdx.x) + (blockDim.x * threadIdx.y + threadIdx.x);
+ 
+ if (idx < *noClasses * noIndividuals){
+    int individual;
+    if ((idx - noIndividuals) <= 0) individual = 0; else individual = idx - noIndividuals;
+    atomicAdd(&F1_Macro[individual], ( TP[idx] / (TP[idx] + 0.5 * (FP[idx] + FN[idx])) ));
+    atomicAdd(&F1_Weighted[individual], ( (samplesPerClass[idx - individual * (*noClasses)] / noTargetValues) * (TP[idx] / (TP[idx] + 0.5 * (FP[idx] + FN[idx]))) ));  
+ }
+   
 }
 
 
 
 
-__global__ void getTpFpFn(float* y_true, float* y_pred, int m, int noClasses, float* y_trueEachClass, float* TP, float* FP, float* FN){
- for (int i = 0; i < noClasses; i++){
-     if(y_pred[threadIdx.x] == y_true[threadIdx.x] && y_pred[threadIdx.x] == y_trueEachClass[i]) { atomicAdd(&TP[i], 1); printf("TP[%i]++\n", i); }
-     if(y_pred[threadIdx.x] != y_true[threadIdx.x] && y_pred[threadIdx.x] == y_trueEachClass[i]) { atomicAdd(&FP[i], 1); printf("FP[%i]++\n", i); }
-     if(y_pred[threadIdx.x] != y_true[threadIdx.x] && y_true[threadIdx.x] == y_trueEachClass[i]) { atomicAdd(&FP[i], 1); printf("FN[%i]++\n", i); }
- }
+__global__ void getTpFpFn(float* y_true, float* y_pred, int n, int m, int noClasses, float* y_trueEachClass, float* TP, float* FP, float* FN){
+    int idx = (blockDim.x * blockDim.y * blockIdx.y * gridDim.x) + (blockDim.x * blockDim.y * blockIdx.x) + (blockDim.x * threadIdx.y + threadIdx.x);
+    if (idx < m * n) {
+        int individual;
+        printf("\n%i - %i\n", idx, n);
+        if ((idx - n) <=0)
+            individual = 0;
+        else
+            individual = idx - n;
+        
+        for (int i = 0; i < noClasses; i++){
+            if(y_pred[idx] == y_trueEachClass[i] && y_true[idx - individual * n] == y_trueEachClass[i]) { atomicAdd(&TP[i + individual * noClasses], 1); }
+            if(y_pred[idx] == y_trueEachClass[i] && y_true[idx - individual * n] != y_trueEachClass[i]) { atomicAdd(&FP[i + individual * noClasses], 1); }
+            if(y_pred[idx] != y_trueEachClass[i] && y_true[idx - individual * n] == y_trueEachClass[i]) { atomicAdd(&FN[i + individual * noClasses], 1); }
+        }
+    }
 }
 
 
@@ -81,7 +98,7 @@ void getVector(float* vector, int size){
 void getMatriz(float* matriz, int rows, int columns){
     for (int i = 0; i < rows; i++)
         for (int e = 0; e < columns; e++)
-            matriz[i][e] = i;
+            matriz[i + e] = i;
     
 }
 
@@ -141,7 +158,7 @@ void F1(float* y_pred, float* y_true, int widthTrue, int rowPred){
 
 
 
-
+ 
 
 
 
@@ -151,7 +168,7 @@ void F1(float* y_pred, float* y_true, int widthTrue, int rowPred){
  cudaMalloc((void**)&valuesByClasses_d, *noClasses * sizeof(float));
  cudaMemcpy(y_trueDevice, y_true, widthTrue * sizeof(float), cudaMemcpyHostToDevice);
  cudaMemcpy(i_d, i, sizeof(int), cudaMemcpyHostToDevice);
-
+   printf("NUMERO DE CLASES: %i", *noClasses);
 
 
 
@@ -188,15 +205,15 @@ void F1(float* y_pred, float* y_true, int widthTrue, int rowPred){
  FP = (float*)malloc(*noClasses * sizeof(float));
  FN = (float*)malloc(*noClasses * sizeof(float));
 
-
-
+dim3 block(32, 32);
+dim3 grid((widthTrue + block.x - 1) / block.x, (rowPred + block.y - 1) / block.y);
 
  cudaMalloc((void**)&TP_d, *noClasses * sizeof(float));
  cudaMalloc((void**)&FP_d, *noClasses * sizeof(float));
  cudaMalloc((void**)&FN_d, *noClasses * sizeof(float));
  cudaMalloc((void**)&y_predDevice, widthTrue * sizeof(float));
  cudaMemcpy(y_predDevice, y_pred, widthTrue * sizeof(float), cudaMemcpyHostToDevice);
- getTpFpFn<<<1, widthTrue>>>(y_trueDevice, y_predDevice, widthTrue, *noClasses, valuesByClasses_d, TP_d, FP_d, FN_d);
+ getTpFpFn<<<grid, block>>>(y_trueDevice, y_predDevice, widthTrue, rowPred, *noClasses, valuesByClasses_d, TP_d, FP_d, FN_d);
  cudaDeviceSynchronize();
 
 
@@ -213,9 +230,9 @@ void F1(float* y_pred, float* y_true, int widthTrue, int rowPred){
  cudaMalloc((void**)&F1_Macro_d, rowPred * sizeof(float));
  cudaMalloc((void**)&F1_Weighted_d, rowPred * sizeof(float));
 
+ dim3 grid1((*noClasses + block.x - 1) / block.x, (rowPred + block.y - 1) / block.y);
 
-
- getF1<<<1, *noClasses>>>(TP_d, FP_d, FN_d, valuesByClasses_d, noClasses_d, samplesPerClass_d, F1_Macro_d, F1_Weighted_d, widthTrue);
+ getF1<<<1, grid1>>>(TP_d, FP_d, FN_d, valuesByClasses_d, noClasses_d, samplesPerClass_d, F1_Macro_d, F1_Weighted_d, widthTrue, rowPred);
  cudaDeviceSynchronize();
  cudaMemcpy(F1_Macro, F1_Macro_d, rowPred * sizeof(float), cudaMemcpyDeviceToHost);
  cudaMemcpy(F1_Weighted, F1_Weighted_d, rowPred * sizeof(float), cudaMemcpyDeviceToHost);
@@ -232,25 +249,7 @@ void F1(float* y_pred, float* y_true, int widthTrue, int rowPred){
 int main(){ 
  // float* y_pred, * y_true, * y_trueEachClass;
  float y_pred[6] = {0, 2, 1, 0, 0, 1}; float y_true [6] = {0, 1, 2, 0, 1, 2};
- float* matrizPred;
-
- matrizPred = (float*)malloc(5 * 6 * sizeof(float));
-
 
 
  F1(y_pred, y_true, 6, 1);
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
