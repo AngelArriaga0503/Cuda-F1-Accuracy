@@ -5,251 +5,216 @@
 #include <unordered_map>
 #include <random>
 
-
-
-
-
-
-__global__ void getF1(float* TP, float* FP, float* FN, float* trueValuesByClass, int* noClasses, float* samplesPerClass, float* F1_Macro, float* F1_Weighted, int noTargetValues, int noIndividuals){
- int idx = (blockDim.x * blockDim.y * blockIdx.y * gridDim.x) + (blockDim.x * blockDim.y * blockIdx.x) + (blockDim.x * threadIdx.y + threadIdx.x);
- 
- if (idx < *noClasses * noIndividuals){
-    int individual;
-    if (idx < *noClasses) individual = 0; else individual = ((idx - noTargetValues) / noTargetValues) + 1;
-    atomicAdd(&F1_Macro[individual], ( TP[idx] / (TP[idx] + 0.5 * (FP[idx] + FN[idx])) ));
-    atomicAdd(&F1_Weighted[individual], ( (samplesPerClass[idx - individual * (*noClasses)] / noTargetValues) * (TP[idx] / (TP[idx] + 0.5 * (FP[idx] + FN[idx]))) ));  
+__global__ void getNumClasses(float* true_labels, int* num_classes, float* temp_class, int* atomic_sync, int* loop_variable, int num_true_labels){
+    int idx = (blockDim.x * blockDim.y * blockIdx.x) + (blockDim.x * threadIdx.y + threadIdx.x);
+    if (idx < num_true_labels)
+    {
+        *temp_class = 0; *num_classes = 0; *loop_variable = 0; // Initialize some variables
+        atomicAdd(atomic_sync, 0); // An atomic operation is made in order to every thread in the grid knows the changes done
+        // All threads in the grid check if there is some value equal to 0 in the true labels, if it's true, then the number of classes added one to its counting
+        if(true_labels[idx] == 0) *num_classes = *num_classes + 1;
+        atomicAdd(atomic_sync, 0); // An atomic operation is made in order to every thread in grid knows that the number of classes has increased
+        if(true_labels[idx] != 0) { // Then, all threads in the grid look for a different value than 0, regardless of whichever each one find, it's stored and the number of classes increases
+            *num_classes = *num_classes + 1;
+            *temp_class = true_labels[idx];
+        }
+        atomicAdd(atomic_sync, 0); // An atomic operation is made in order to every thread in the grid knows the changes done
+        for ( ; *loop_variable < 1; *loop_variable = *loop_variable + 1) // The loop ends when loop variable reaches 1
+        {
+            if(true_labels[idx] == *temp_class) true_labels[idx] = 0; // Using the last value different than 0, all threads look for it and rewrite its value as 0
+            if(true_labels[idx] != 0) { // If there is another value different than 0, store it and loop variable decrease by 1 
+            *num_classes = *num_classes + 1;
+            *temp_class = true_labels[idx];
+            *loop_variable = *loop_variable - 1;
+        }
+        atomicAdd(atomic_sync, 0); // An atomic operation is made in order to every thread in the grid knows the changes done
+    }
  }
-   
 }
 
-
-
-
-__global__ void getTpFpFn(float* y_true, float* y_pred, int n, int m, int noClasses, float* y_trueEachClass, float* TP, float* FP, float* FN){
-    int idx = (blockDim.x * blockDim.y * blockIdx.y * gridDim.x) + (blockDim.x * blockDim.y * blockIdx.x) + (blockDim.x * threadIdx.y + threadIdx.x);
-    if (idx < m * n) {
-        int individual;
-        if (idx < n) individual = 0;
-        else individual = ((idx - n) / n) + 1;
-        for (int i = 0; i < noClasses; i++){
-            printf("y_pred[%i]: %f != y_trueEachClass[%i]: %f && y_true[%i]: %f == y_trueEachClass[%i]: %f = %d\n", idx, y_pred[idx], i, y_trueEachClass[i], idx - individual * n, y_true[idx - individual * n], i, y_trueEachClass[i], (y_pred[idx] != y_trueEachClass[i] && y_true[idx - individual * n] == y_trueEachClass[i]));
-            if(y_pred[idx] == y_trueEachClass[i] && y_true[idx - individual * n] == y_trueEachClass[i]) { atomicAdd(&TP[i + individual * noClasses], 1); }
-            if(y_pred[idx] == y_trueEachClass[i] && y_true[idx - individual * n] != y_trueEachClass[i]) { atomicAdd(&FP[i + individual * noClasses], 1); }
-            if(y_pred[idx] != y_trueEachClass[i] && y_true[idx - individual * n] == y_trueEachClass[i]) { atomicAdd(&FN[i + individual * noClasses], 1); }
+__global__ void getClasses(float* true_labels, int* num_classes, float* temp_class, int* atomic_sync, float* class_labels, int* loop_variable, int num_true_labels){
+    int idx = (blockDim.x * blockDim.y * blockIdx.x) + (blockDim.x * threadIdx.y + threadIdx.x);
+    if (idx < num_true_labels)
+    {
+        *temp_class = 0; *loop_variable = 0; // Initialize some variables
+        atomicAdd(atomic_sync, 0); // An atomic operation is made in order to every thread in the grid knows the changes done
+        // All threads in the grid check if there is some value equal to 0 in the true labels, if it's true, 0 is going to be added to class labels array, and loop variable increase 1
+        if(true_labels[threadIdx.x] == 0) { class_labels[0] = 0; *loop_variable = *loop_variable + 1; } 
+        atomicAdd(atomic_sync, 0); // An atomic operation is made in order to every thread in the grid knows the changes which have been made in both true labels and class labels                                                                   
+                                                                                                 
+        for ( ; *loop_variable < *num_classes; *loop_variable = *loop_variable + 1) // The loop ends when loop variable reaches the number of classes - 1                      
+        {
+            if(true_labels[threadIdx.x] != 0) { *temp_class = true_labels[threadIdx.x]; class_labels[*loop_variable] = *temp_class; } // All threads look for any different value than 0, then it's stored in class labels array
+            atomicAdd(atomic_sync, 0); // An atomic operation is made in order to every thread in the grid knows the changes done
+            if(true_labels[threadIdx.x] == *temp_class) true_labels[threadIdx.x] = 0; // All threads in the grid look for the value which has already stored in class labels array, and rewrite it as 0
+            atomicAdd(atomic_sync, 0); // An atomic operation is made in order to every thread in the grid knows the changes done
         }
     }
 }
 
-
-__global__ void getNoClassesKernel(float* trueValues, int* noClasses, float* temp, int* count, int* i){
- if(trueValues[threadIdx.x] == 0) *noClasses = *noClasses + 1;
- atomicAdd(count, 0);
- if(trueValues[threadIdx.x] != 0) {
-     *noClasses = *noClasses + 1;
-     *temp = trueValues[threadIdx.x];
- }
- atomicAdd(count, 0);
- for ( ; *i < 1; *i = *i + 1)
- {
-     if(trueValues[threadIdx.x] == *temp) trueValues[threadIdx.x] = 0;
-     if(trueValues[threadIdx.x] != 0) {
-         *noClasses = *noClasses + 1;
-         *temp = trueValues[threadIdx.x];
-         *i = *i - 1;
-     }
-     atomicAdd(count, 0);
- }
-}
-
-__global__ void getClasses(float* trueValues, int* noClasses, float* temp, int* count, float* trueValuesByClass, int* i){
- if(trueValues[threadIdx.x] == 0) { trueValuesByClass[0] = 0; *i = *i + 1; }
- atomicAdd(count, 0);
- for ( ; *i < *noClasses; *i = *i + 1)
- {
-     if(trueValues[threadIdx.x] != 0) *temp = trueValues[threadIdx.x];
-     atomicAdd(count, 0);
-     trueValuesByClass[*i] = *temp;
-     if(trueValues[threadIdx.x] == *temp) trueValues[threadIdx.x] = 0;
-     atomicAdd(count, 0);
- }
-}
-
-__global__ void getSamplesPerClass(float* trueValues, int* noClasses, int* count, float* trueValuesByClass, float* samplesPerClass){
- for (int i = 0; i < *noClasses; i++) if(trueValues[threadIdx.x] == trueValuesByClass[i]) atomicAdd(&samplesPerClass[i], 1);
-}
-
-__global__ void getMacro(float* F1_Macro, int* noClasses, int noIndividuals){
+__global__ void getSamplesPerClass(float* true_labels, int* num_classes, int* atomic_sync, float* class_labels, float* samples_per_class, int num_true_labels){
     int idx = (blockDim.x * blockDim.y * blockIdx.x) + (blockDim.x * threadIdx.y + threadIdx.x);
-    if (idx < noIndividuals)
+    if (idx < num_true_labels)
     {
-        F1_Macro[idx] /= *noClasses;
+        for (int i = 0; i < *num_classes; i++) // The loop ends when i reaches the number of classes
+        if(true_labels[threadIdx.x] == class_labels[i]) atomicAdd(&samples_per_class[i], 1); // In each iteration, threads look for coincendeces between true labels and class labels arrays and count them
     }
 }
-void getVector(float* vector, int size){
- for (int i = 0; i < size; i++){
-     if(i % 2 == 0) vector[i] = 1;
-     else vector[i] = 2;
- } 
-}
 
-void getMatriz(float* matriz, int rows, int columns){
-    for (int i = 0; i < rows; i++)
-        for (int e = 0; e < columns; e++)
-            matriz[i + e] = i;
-    
-}
-
-
-void F1(float* y_pred, float* y_true, int widthTrue, int rowPred){
- float* y_trueDevice, * temp, * temp_d, * valuesByClass, * valuesByClasses_d, * samplesPerClass, * samplesPerClass_d, * y_predDevice, * TP, * FP, * FN, * TP_d, * FP_d, * FN_d;
- int* count, *noClasses, * i, * count_d, *noClasses_d, * i_d;
-
-
-
-
- temp = (float*)malloc(sizeof(float));
- count = (int*)malloc(sizeof(int));
- noClasses = (int*)malloc(sizeof(int));
- i = (int*)malloc(sizeof(int));
-
-
-
-
- *temp = 0;
- *count = 0;
- *noClasses = 0;
- *i = 0;
-
-
- cudaMalloc((void**)&y_trueDevice, widthTrue * sizeof(float));
- cudaMalloc((void**)&temp_d, sizeof(float));
- cudaMalloc((void**)&count_d, sizeof(int));
- cudaMalloc((void**)&noClasses_d, sizeof(int));
- cudaMalloc((void**)&i_d, sizeof(int));
-
-
-
-
- cudaMemcpy(y_trueDevice, y_true, widthTrue * sizeof(float), cudaMemcpyHostToDevice);
- cudaMemcpy(temp_d, temp, sizeof(float), cudaMemcpyHostToDevice);
- cudaMemcpy(count_d, count, sizeof(int), cudaMemcpyHostToDevice);
- cudaMemcpy(noClasses_d, noClasses, sizeof(int), cudaMemcpyHostToDevice);
- cudaMemcpy(i_d, i, sizeof(int), cudaMemcpyHostToDevice);
-
-
-
-
- getNoClassesKernel<<<1, widthTrue>>>(y_trueDevice, noClasses_d, temp_d, count_d, i_d);
- cudaDeviceSynchronize();
-
-
-
- 
-
-
-
-
- cudaMemcpy(noClasses, noClasses_d, sizeof(int), cudaMemcpyDeviceToHost);
- valuesByClass = (float*)malloc(*noClasses * sizeof(float));
- cudaMalloc((void**)&valuesByClasses_d, *noClasses * sizeof(float));
- cudaMemcpy(y_trueDevice, y_true, widthTrue * sizeof(float), cudaMemcpyHostToDevice);
- cudaMemcpy(i_d, i, sizeof(int), cudaMemcpyHostToDevice);
-
- getClasses<<<1, widthTrue>>>(y_trueDevice, noClasses_d, temp_d, count_d, valuesByClasses_d, i_d);
- cudaDeviceSynchronize();
- cudaMemcpy(valuesByClass, valuesByClasses_d, *noClasses * sizeof(float), cudaMemcpyDeviceToHost);
-
-
-
-
-
-
-
-
- samplesPerClass = (float*)malloc(*noClasses * sizeof(float));
- cudaMalloc((void**)&samplesPerClass_d, *noClasses * sizeof(float));
- cudaMemcpy(y_trueDevice, y_true, widthTrue * sizeof(float), cudaMemcpyHostToDevice);
-
-
-
-
- getSamplesPerClass<<<1, widthTrue>>>(y_trueDevice, noClasses_d, count_d, valuesByClasses_d, samplesPerClass_d);
- cudaDeviceSynchronize();
- cudaMemcpy(samplesPerClass, samplesPerClass_d, *noClasses * sizeof(float), cudaMemcpyDeviceToHost);
-
-
-
-
-
-
-
-
- TP = (float*)malloc(*noClasses * rowPred * sizeof(float));
- FP = (float*)malloc(*noClasses * rowPred * sizeof(float));
- FN = (float*)malloc(*noClasses * rowPred * sizeof(float));
-
-dim3 block(32, 32);
-dim3 grid((widthTrue + block.x - 1) / block.x, (rowPred + block.y - 1) / block.y);
-
- cudaMalloc((void**)&TP_d, *noClasses * rowPred * sizeof(float));
- cudaMalloc((void**)&FP_d, *noClasses * rowPred * sizeof(float));
- cudaMalloc((void**)&FN_d, *noClasses * rowPred * sizeof(float));
- cudaMalloc((void**)&y_predDevice, rowPred * widthTrue * sizeof(float));
- cudaMemcpy(y_predDevice, y_pred, rowPred * widthTrue * sizeof(float), cudaMemcpyHostToDevice);
- getTpFpFn<<<grid, block>>>(y_trueDevice, y_predDevice, widthTrue, rowPred, *noClasses, valuesByClasses_d, TP_d, FP_d, FN_d);
- cudaDeviceSynchronize();
-
-
- cudaMemcpy(TP, TP_d, *noClasses * sizeof(float), cudaMemcpyDeviceToHost);
- cudaMemcpy(FP, FP_d, *noClasses * sizeof(float), cudaMemcpyDeviceToHost);
- cudaMemcpy(FN, FN_d, *noClasses * sizeof(float), cudaMemcpyDeviceToHost);
- 
- 
- 
- float* F1_Macro, * F1_Macro_d;
- float* F1_Weighted, * F1_Weighted_d;
- F1_Macro = (float*)malloc(rowPred * sizeof(float));
- F1_Weighted = (float*)malloc(rowPred * sizeof(float));
- cudaMalloc((void**)&F1_Macro_d, rowPred * sizeof(float));
- cudaMalloc((void**)&F1_Weighted_d, rowPred * sizeof(float));
-
- dim3 grid1((*noClasses + block.x - 1) / block.x, (rowPred + block.y - 1) / block.y);
-
- getF1<<<grid, block>>>(TP_d, FP_d, FN_d, valuesByClasses_d, noClasses_d, samplesPerClass_d, F1_Macro_d, F1_Weighted_d, widthTrue, rowPred);
- cudaDeviceSynchronize();
- cudaMemcpy(F1_Macro, F1_Macro_d, rowPred * sizeof(float), cudaMemcpyDeviceToHost);
- cudaMemcpy(F1_Weighted, F1_Weighted_d, rowPred * sizeof(float), cudaMemcpyDeviceToHost);
- 
- dim3 grid2((rowPred + block.x - 1) / block.x);
-
- getMacro<<<grid2, block>>>(F1_Macro_d, noClasses_d, rowPred);
- cudaDeviceSynchronize();
- cudaMemcpy(F1_Macro, F1_Macro_d, rowPred * sizeof(float), cudaMemcpyDeviceToHost);
-
- for (int i = 0; i < rowPred; i++)
- {
-    printf("F1 MACRO[%i]: %f\n", i, F1_Macro[i]);
-    printf("F1 WEIGHTED[%i]: %f\n", i, F1_Weighted[i]);
-    for (int e = 0; e < *noClasses; e++)
-    {
-        printf("\nTP[clase: %i, individuo: %i]: %f\n", e, i, TP[i * e + e]);
-        printf("\nFP[clase: %i, individuo: %i]: %f\n", e, i, TP[i * e + e]);
-        printf("\nFN[clase: %i, individuo: %i]: %f\n", e, i, FN[i * e + e]);
+__global__ void getTpFpFn(float* true_labels, float* predicted_labels, int num_true_labels, int num_individuals, int num_classes, float* class_labels, float* true_positives, float* false_positives, float* false_negatives){
+    int idx = (blockDim.x * blockDim.y * blockIdx.y * gridDim.x) + (blockDim.x * blockDim.y * blockIdx.x) + (blockDim.x * threadIdx.y + threadIdx.x);
+    if (idx < num_individuals * num_true_labels) {
+        int individual;
+        // Every certain number of threads (num_true_labels) represents an individual, so its predictions. This operations are made in order to identify the number of individual every "group" is 
+        if (idx < num_true_labels) individual = 0; else individual = ((idx - num_true_labels) / num_true_labels) + 1;
+        if (idx < num_individuals * num_classes) { true_positives[idx] = 0; false_negatives[idx] = 0; false_positives[idx] = 0; }
+        for (int i = 0; i < num_classes; i++){ // This loop (0 - number of classes) counts the total number of true positives, false positives and false negatives for each class
+            if(predicted_labels[idx] == class_labels[i] && true_labels[idx - individual * num_true_labels] == class_labels[i]) { atomicAdd(&true_positives[i + individual * num_classes], 1); }
+            if(predicted_labels[idx] == class_labels[i] && true_labels[idx - individual * num_true_labels] != class_labels[i]) { atomicAdd(&false_positives[i + individual * num_classes], 1); }
+            if(predicted_labels[idx] != class_labels[i] && true_labels[idx - individual * num_true_labels] == class_labels[i]) { atomicAdd(&false_negatives[i + individual * num_classes], 1); }
+        }
     }
-    
- }
- 
- // printf("F1 MACRO: %f, TP_1: %f, FP_1: %f, FN_1: %f, TP_2: %f, FP_2: %f, FN_2: %f, TP_3: %f, FP_3: %f, FN_3: %f", *F1_Macro, TP[0], FP[0], FN[0], TP[1], FP[1], FN[1], TP[2], FP[2], FN[2]);
- // printf("\nF1 WEIGHTED: %f\n", *F1_Weighted);
-
-
 }
 
+__global__ void f1(float* true_positives, float* false_positives, float* false_negatives, float* class_labels, int* num_classes, float* samples_per_class, float* macro_f1_score, float* weighted_f1_score, int num_true_labels, int num_individuals){
+    int idx = (blockDim.x * blockDim.y * blockIdx.y * gridDim.x) + (blockDim.x * blockDim.y * blockIdx.x) + (blockDim.x * threadIdx.y + threadIdx.x);
+ 
+    if (idx < *num_classes * num_individuals)
+    {
+        int individual;
+        // Every certain number of threads (num_true_labels) represents an individual, so its predictions. This operations are made in order to identify the number of individual every "group" is 
+        if (idx < *num_classes) individual = 0; else individual = ((idx - num_true_labels) / num_true_labels) + 1; 
+        // Here all threads contribute to the macro and weighted f1 score for each individual
+        atomicAdd(&macro_f1_score[individual], ( true_positives[idx] / (true_positives[idx] + 0.5 * (false_positives[idx] + false_negatives[idx])) ));
+        atomicAdd(&weighted_f1_score[individual], ( (samples_per_class[idx - individual * (*num_classes)] / num_true_labels) * (true_positives[idx] / (true_positives[idx] + 0.5 * (false_positives[idx] + false_negatives[idx]))) ));  
+        // Since macro f1 must be divided by the number of classes, it is convenient that that operation is made by a different kernel
+    }
+}
 
-int main(){ 
- // float* y_pred, * y_true, * y_trueEachClass;
- float y_pred[12] = {0, 2, 1, 0, 0, 1, 0, 2, 1, 0, 0, 1}; float y_true [7] = {0, 1, 2, 0, 1, 2};
+__global__ void getMacro(float* macro_f1_score, int* num_classes, int num_individuals){
+    int idx = (blockDim.x * blockDim.y * blockIdx.x) + (blockDim.x * threadIdx.y + threadIdx.x);
+    // Here is just made the division which was missing
+    if (idx < num_individuals)
+        macro_f1_score[idx] /= *num_classes;
+}
+
+// Since there are a lot of kernel calls and dinamically store statements, it's necessary to do all of this from the device and then just doing all that suff
+void getF1(float* predicted_labels, float* true_labels, int num_individuals, int num_true_labels){
+    // Declaration of all variables that kernles will need
+    float* true_labels_d,* temp_d, * class_labels_d, * samples_per_class_d, * predicted_labels_d, * macro_f1_score_d, * weighted_f1_score_d, * true_positives_d, * false_positives_d, * false_negatives_d;
+    float* macro_f1_score, * weighted_f1_score;
+    int* atomic_sync_d, * num_classes_d, *loop_variable_d;
+    int* num_classes;
+
+    // Grid's dimensions
+    dim3 block(32, 32);
+    dim3 grid((num_true_labels + block.x - 1) / block.x);
+
+    // Memory allocation
+    cudaMalloc((void**)&true_labels_d, num_true_labels * sizeof(float));
+    cudaMalloc((void**)&predicted_labels_d, num_individuals * num_true_labels * sizeof(float));
+    cudaMalloc((void**)&num_classes_d, sizeof(int));
+    cudaMalloc((void**)&atomic_sync_d, sizeof(int));
+    cudaMalloc((void**)&loop_variable_d, sizeof(int));
+    cudaMalloc((void**)&temp_d, sizeof(float));
+    num_classes = (int*)malloc(sizeof(int));
+
+    // Transfering data
+    cudaMemcpy(true_labels_d, true_labels, num_true_labels * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(predicted_labels_d, predicted_labels, num_individuals * num_true_labels * sizeof(float), cudaMemcpyHostToDevice);
 
 
- F1(y_pred, y_true, 6, 2);
+
+    // Getting the total number of classes
+    getNumClasses<<<grid, block>>>(true_labels_d, num_classes_d, temp_d, atomic_sync_d, loop_variable_d, num_true_labels);
+    cudaDeviceSynchronize();
+
+
+
+    // Transfering the total number of classes to host
+    cudaMemcpy(num_classes, num_classes_d, sizeof(int), cudaMemcpyDeviceToHost);
+
+    // Allocating dinamically the arrays for classes' labels, samples per class, TP, FP, FN, macro F1 and weighted F1
+    cudaMalloc((void**)&class_labels_d, *num_classes * sizeof(float));
+    cudaMalloc((void**)&samples_per_class_d, *num_classes * sizeof(float));
+    cudaMalloc((void**)&true_positives_d, num_individuals * *num_classes * sizeof(float));
+    cudaMalloc((void**)&false_negatives_d, num_individuals * *num_classes * sizeof(float));
+    cudaMalloc((void**)&false_positives_d, num_individuals * *num_classes * sizeof(float));
+    cudaMalloc((void**)&weighted_f1_score_d, num_individuals * sizeof(float));
+    cudaMalloc((void**)&macro_f1_score_d, num_individuals * sizeof(float));
+
+    weighted_f1_score = (float*)malloc(num_individuals * sizeof(float));
+    macro_f1_score = (float*)malloc(num_individuals * sizeof(float));
+
+    // Transfering data
+    cudaMemcpy(true_labels_d, true_labels, num_true_labels * sizeof(float), cudaMemcpyHostToDevice);
+
+    // Getting classes' labels
+    getClasses<<<grid, block>>>(true_labels_d, num_classes_d, temp_d, atomic_sync_d, class_labels_d, loop_variable_d, num_true_labels);
+    cudaDeviceSynchronize();
+
+
+
+    // Transfering data
+    cudaMemcpy(true_labels_d, true_labels, num_true_labels * sizeof(float), cudaMemcpyHostToDevice);
+
+    // Getting samples per class
+    getSamplesPerClass<<<grid, block>>>(true_labels_d, num_classes_d, atomic_sync_d, class_labels_d, samples_per_class_d, num_true_labels);
+    cudaDeviceSynchronize();
+
+
+
+    // Rearranging grid's dimentions
+    dim3 grid2((num_true_labels + block.x - 1) / block.x, (num_individuals + block.y - 1) / block.y);
+
+    // Getting Tp, fp, fn for each class and each individual
+    getTpFpFn<<<grid2, block>>>(true_labels_d, predicted_labels_d, num_true_labels, num_individuals, *num_classes, class_labels_d, true_positives_d, false_positives_d, false_negatives_d);
+    cudaDeviceSynchronize();
+
+
+
+    // Rearranging grid's dimentions
+    dim3 grid3((*num_classes + block.x - 1) / block.x, (num_individuals + block.y - 1) / block.y);
+
+    // Getting both macro and weghted f1 | division for macro one is going to be missing
+    f1<<<grid3, block>>>(true_positives_d, false_positives_d, false_negatives_d, class_labels_d, num_classes_d, samples_per_class_d, macro_f1_score_d, weighted_f1_score_d, num_true_labels, num_individuals);
+    cudaDeviceSynchronize();
+
+
+    // Rearranging grid's dimentions
+    dim3 grid4((num_individuals + block.x - 1) / block.x);
+
+    // Aplying the division for macro f1
+    getMacro<<<grid4, block>>>(macro_f1_score_d, num_classes_d, num_individuals);
+
+
+    // Transfering data back to host
+    cudaMemcpy(macro_f1_score, macro_f1_score_d, num_individuals * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(weighted_f1_score, weighted_f1_score_d, num_individuals * sizeof(float), cudaMemcpyDeviceToHost);
+
+    
+
+    // Printing scores
+    for (int i = 0; i < num_individuals; i++)
+        printf("Individual %i, macro f1: %f, weighted f1: %f\n", i, macro_f1_score[i], weighted_f1_score[i]);
+
+    // Deallocating memory for both device and host
+    cudaFree(true_labels_d);
+    cudaFree(predicted_labels_d);
+    cudaFree(num_classes_d);
+    cudaFree(macro_f1_score_d);
+    cudaFree(weighted_f1_score_d);
+    cudaFree(true_positives_d);
+    cudaFree(false_negatives_d);
+    cudaFree(false_positives_d);
+    cudaFree(loop_variable_d);
+    cudaFree(atomic_sync_d);
+    cudaFree(samples_per_class_d);
+    cudaFree(class_labels_d);
+    cudaFree(temp_d);
+}
+
+int main(){
+    float predicted_labels[12] = {0, 2, 1, 0, 0, 1, 1, 1, 0, 2, 2, 1}; float true_labels [6] = {0, 1, 2, 0, 1, 2};
+    getF1(predicted_labels, true_labels, 2, 6);
 }
