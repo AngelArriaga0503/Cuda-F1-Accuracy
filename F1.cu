@@ -99,10 +99,9 @@ __global__ void getMacro(float* macro_f1_score, int* num_classes, int num_indivi
 }
 
 // Since there are a lot of kernel calls and dinamically store statements, it's necessary to do all of this from the device and then just doing all that suff
-void getF1(float* predicted_labels, float* true_labels, int num_individuals, int num_true_labels){
-    // Declaration of all variables that kernles will need
+void getF1(float* predicted_labels, float* true_labels, int num_individuals, int num_true_labels, float* macro_f1_score, float* weighted_f1_score){
+    // Declaration of all variables that kernles and this function will need
     float* true_labels_d,* temp_d, * class_labels_d, * samples_per_class_d, * predicted_labels_d, * macro_f1_score_d, * weighted_f1_score_d, * true_positives_d, * false_positives_d, * false_negatives_d;
-    float* macro_f1_score, * weighted_f1_score;
     int* atomic_sync_d, * num_classes_d, *loop_variable_d;
     int* num_classes;
 
@@ -212,9 +211,14 @@ void getF1(float* predicted_labels, float* true_labels, int num_individuals, int
     cudaFree(samples_per_class_d);
     cudaFree(class_labels_d);
     cudaFree(temp_d);
+    free(num_classes);
 }
 
 int main(){
     float predicted_labels[12] = {0, 2, 1, 0, 0, 1, 1, 1, 0, 2, 2, 1}; float true_labels [6] = {0, 1, 2, 0, 1, 2};
-    getF1(predicted_labels, true_labels, 2, 6);
+    float* macrof1, *weightedf1;
+    macrof1 = (float*)malloc(2 * sizeof(float));
+    weightedf1 = (float*)malloc(2 * sizeof(float));
+
+    getF1(predicted_labels, true_labels, 2, 6, macrof1, weightedf1);
 }
